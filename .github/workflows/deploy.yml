@@ -21,11 +21,11 @@ jobs:
         run: |
           if [ "${{ github.ref_name }}" = "main" ]; then
             echo "container_name=kmds" >> $GITHUB_OUTPUT
-            echo "subdomain=kmds.gasper-inc.com" >> $GITHUB_OUTPUT
+            echo "subdomain=kmdatasolutions.com" >> $GITHUB_OUTPUT
             echo "image_name=kmds:latest" >> $GITHUB_OUTPUT
           else
             echo "container_name=kmds-develop" >> $GITHUB_OUTPUT
-            echo "subdomain=kmds-dev.gasper-inc.com" >> $GITHUB_OUTPUT
+            echo "subdomain=dev.kmdatasolutions.com" >> $GITHUB_OUTPUT
             echo "image_name=kmds-develop:latest" >> $GITHUB_OUTPUT
           fi
 
