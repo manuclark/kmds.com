@@ -66,15 +66,16 @@ como **GitHub Secrets** y se referencian en los workflows con la sintaxis
   1. Checkout del código
   2. Definir variables según rama (nombre contenedor, subdominio, imagen)
   3. Build de la imagen Docker
-  4. Copiar imagen + deploy.sh al servidor via SCP
-  5. Ejecutar deploy.sh en el servidor via SSH
-       a. Detectar puertos docker en uso
-       b. Encontrar primer puerto libre en rango 8080–8099
-       c. Detener y eliminar contenedor anterior (si existe)
-       d. Levantar nuevo contenedor con puerto disponible
-       e. Generar/actualizar config Nginx (HTTP + HTTPS)
-       f. Activar site y recargar Nginx
-       g. Verificar salud del contenedor
+  4. Copiar imagen al servidor via SCP (solo image.tar.gz)
+  5. Ejecutar lógica de despliegue en el servidor via SSH (inlineada en el workflow)
+       a. Cargar imagen Docker
+       b. Reusar puerto existente del contenedor (si ya existe)
+       c. Buscar primer puerto libre en rango 8080–8099 (si es nuevo)
+       d. Detener y eliminar contenedor anterior
+       e. Levantar nuevo contenedor con puerto disponible
+       f. Generar/actualizar config Nginx (HTTP + HTTPS)
+       g. Activar site y recargar Nginx
+       h. Verificar salud del contenedor
 ```
 
 ### Mapeo de ramas y entornos
@@ -110,15 +111,18 @@ Los contenedores Docker usan el rango **8080–8099** en el host.
 repositorio/
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml     ← Workflow de CI/CD
+│       └── deploy.yml     ← Workflow de CI/CD (lógica de despliegue inlineada)
 ├── .agents/
 │   └── skills/
 │       └── kmds-deploy/
 │           └── SKILL.md   ← Este archivo
-├── deploy.sh              ← Script de despliegue (se transfiere al servidor)
 ├── Dockerfile             ← Build de la imagen Docker
 └── ...                    ← Código fuente del proyecto
 ```
+
+> **Nota:** `deploy.sh` fue eliminado. Toda la lógica de despliegue está inlineada
+> en el paso SSH del workflow, lo que simplifica el repositorio y elimina la
+> dependencia de que el archivo esté presente en cada commit.
 
 ---
 
@@ -138,61 +142,60 @@ EXPOSE 80
 
 ---
 
-## Sección 4 — Script `deploy.sh`
+## Sección 4 — Lógica de despliegue (inlineada en el workflow)
 
-El script recibe cuatro argumentos posicionales:
+> `deploy.sh` fue eliminado del repositorio. La lógica equivalente está inlineada
+> directamente en el paso SSH de `.github/workflows/deploy.yml`.
 
-```bash
-deploy.sh <nombre-contenedor> <imagen> <puerto-interno> <subdominio>
-```
-
-### Lógica completa
+### Lógica del script SSH
 
 ```bash
-#!/bin/bash
 set -euo pipefail
 
-CONTAINER_NAME="$1"
-IMAGE_NAME="$2"
-INTERNAL_PORT="$3"
-SUBDOMAIN="$4"
+CONTAINER_NAME="<nombre-contenedor>"
+IMAGE_NAME="<imagen>:latest"
+INTERNAL_PORT="80"
+SUBDOMAIN="<subdominio>"
 
-# 1. Detectar puertos en uso por Docker
-USED_PORTS=$(docker ps --format '{{.Ports}}' | grep -oP '0\.0\.0\.0:\K[0-9]+' | sort -n)
+# Cargar imagen
+cd /tmp/deploy
+gunzip -c image.tar.gz | docker load
+rm -rf /tmp/deploy
 
-# 2. Encontrar primer puerto libre en el rango 8080–8099
-AVAILABLE_PORT=""
-for PORT in $(seq 8080 8099); do
-  if ! echo "$USED_PORTS" | grep -q "^$PORT$"; then
-    AVAILABLE_PORT=$PORT
-    break
-  fi
-done
+# Reusar puerto actual si el contenedor ya existe
+# Nota: | head -1 evita que docker port retorne dos líneas (IPv4 + IPv6)
+CURRENT_PORT=$(docker port "$CONTAINER_NAME" "$INTERNAL_PORT" 2>/dev/null | grep -oP ':\K[0-9]+' | head -1 || true)
 
-if [ -z "$AVAILABLE_PORT" ]; then
-  echo "❌ No hay puertos disponibles en el rango 8080-8099"
-  exit 1
-fi
-
-# Si el contenedor ya existe, liberar su puerto antes de buscar uno nuevo
-# (evita que se asigne un puerto diferente en cada redeploy)
-CURRENT_PORT=$(docker port "$CONTAINER_NAME" "$INTERNAL_PORT" 2>/dev/null | grep -oP ':\K[0-9]+' || true)
 if [ -n "$CURRENT_PORT" ]; then
   AVAILABLE_PORT=$CURRENT_PORT
+else
+  # Buscar primer puerto libre en el rango 8080–8099
+  USED_PORTS=$(docker ps --format '{{.Ports}}' | grep -oP '0\.0\.0\.0:\K[0-9]+' | sort -n)
+  AVAILABLE_PORT=""
+  for PORT in $(seq 8080 8099); do
+    if ! echo "$USED_PORTS" | grep -q "^$PORT$"; then
+      AVAILABLE_PORT=$PORT
+      break
+    fi
+  done
+  if [ -z "$AVAILABLE_PORT" ]; then
+    echo "❌ No hay puertos disponibles en el rango 8080-8099"
+    exit 1
+  fi
 fi
 
-# 3. Detener y eliminar contenedor anterior
+# Detener y eliminar contenedor anterior
 docker stop "$CONTAINER_NAME" 2>/dev/null || true
 docker rm   "$CONTAINER_NAME" 2>/dev/null || true
 
-# 4. Levantar nuevo contenedor
+# Levantar nuevo contenedor
 docker run -d \
   --name "$CONTAINER_NAME" \
   --restart unless-stopped \
   -p "$AVAILABLE_PORT:$INTERNAL_PORT" \
   "$IMAGE_NAME"
 
-# 5. Generar configuración Nginx (HTTP redirect + HTTPS proxy)
+# Generar configuración Nginx (HTTP redirect + HTTPS proxy)
 sudo tee /etc/nginx/sites-available/"$SUBDOMAIN".conf > /dev/null <<EOF
 server {
     listen 80;
@@ -224,15 +227,15 @@ server {
 }
 EOF
 
-# 6. Activar site y recargar Nginx
+# Activar site y recargar Nginx
 sudo ln -sf /etc/nginx/sites-available/"$SUBDOMAIN".conf \
             /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 
-# 7. Verificar salud del contenedor
+# Health check
 sleep 5
 curl -sf http://localhost:"$AVAILABLE_PORT"/ -o /dev/null \
-  && echo "✅ Contenedor $CONTAINER_NAME desplegado en puerto $AVAILABLE_PORT" \
+  && echo "✅ $CONTAINER_NAME desplegado en puerto $AVAILABLE_PORT" \
   || echo "⚠️ Health check falló — verificar manualmente"
 ```
 
@@ -275,13 +278,13 @@ jobs:
           docker build -t ${{ steps.vars.outputs.image_name }} .
           docker save ${{ steps.vars.outputs.image_name }} | gzip > image.tar.gz
 
-      - name: Copiar imagen y script al servidor
+      - name: Copiar imagen al servidor
         uses: appleboy/scp-action@v0.1.7
         with:
           host:     ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key:      ${{ secrets.EC2_SSH_KEY }}
-          source:   "image.tar.gz,deploy.sh"
+          source:   "image.tar.gz"
           target:   "/tmp/deploy"
 
       - name: Ejecutar despliegue en servidor
@@ -291,15 +294,55 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key:      ${{ secrets.EC2_SSH_KEY }}
           script: |
+            set -euo pipefail
+
+            CONTAINER_NAME="${{ steps.vars.outputs.container_name }}"
+            IMAGE_NAME="${{ steps.vars.outputs.image_name }}"
+            INTERNAL_PORT="80"
+            SUBDOMAIN="${{ steps.vars.outputs.subdomain }}"
+
             cd /tmp/deploy
             gunzip -c image.tar.gz | docker load
-            chmod +x deploy.sh
-            sudo bash deploy.sh \
-              "${{ steps.vars.outputs.container_name }}" \
-              "${{ steps.vars.outputs.image_name }}" \
-              "80" \
-              "${{ steps.vars.outputs.subdomain }}"
             rm -rf /tmp/deploy
+
+            # Reusar puerto actual si el contenedor ya existe
+            # | head -1 evita duplicados IPv4/IPv6 de docker port
+            CURRENT_PORT=$(docker port "$CONTAINER_NAME" "$INTERNAL_PORT" 2>/dev/null | grep -oP ':\K[0-9]+' | head -1 || true)
+
+            if [ -n "$CURRENT_PORT" ]; then
+              AVAILABLE_PORT=$CURRENT_PORT
+            else
+              USED_PORTS=$(docker ps --format '{{.Ports}}' | grep -oP '0\.0\.0\.0:\K[0-9]+' | sort -n)
+              AVAILABLE_PORT=""
+              for PORT in $(seq 8080 8099); do
+                if ! echo "$USED_PORTS" | grep -q "^$PORT$"; then
+                  AVAILABLE_PORT=$PORT; break
+                fi
+              done
+              [ -z "$AVAILABLE_PORT" ] && { echo "❌ Sin puertos disponibles"; exit 1; }
+            fi
+
+            docker stop "$CONTAINER_NAME" 2>/dev/null || true
+            docker rm   "$CONTAINER_NAME" 2>/dev/null || true
+
+            docker run -d \
+              --name "$CONTAINER_NAME" \
+              --restart unless-stopped \
+              -p "$AVAILABLE_PORT:$INTERNAL_PORT" \
+              "$IMAGE_NAME"
+
+            sudo tee /etc/nginx/sites-available/"$SUBDOMAIN".conf > /dev/null <<EOF
+            ... (ver Sección 4 para el bloque Nginx completo)
+            EOF
+
+            sudo ln -sf /etc/nginx/sites-available/"$SUBDOMAIN".conf \
+                        /etc/nginx/sites-enabled/
+            sudo nginx -t && sudo systemctl reload nginx
+
+            sleep 5
+            curl -sf http://localhost:"$AVAILABLE_PORT"/ -o /dev/null \
+              && echo "✅ $CONTAINER_NAME desplegado en puerto $AVAILABLE_PORT" \
+              || echo "⚠️ Health check falló"
 ```
 
 ---
