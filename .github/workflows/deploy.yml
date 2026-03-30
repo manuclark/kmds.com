@@ -1,0 +1,78 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout del código ──
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # ── Definir variables según la rama ──
+      - name: Definir variables según rama
+        id: vars
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "container_name=kmds" >> $GITHUB_OUTPUT
+            echo "subdomain=kmds.gasper-inc.com" >> $GITHUB_OUTPUT
+            echo "image_name=kmds:latest" >> $GITHUB_OUTPUT
+          else
+            echo "container_name=kmds-develop" >> $GITHUB_OUTPUT
+            echo "subdomain=kmds-dev.gasper-inc.com" >> $GITHUB_OUTPUT
+            echo "image_name=kmds-develop:latest" >> $GITHUB_OUTPUT
+          fi
+
+      # ── Build de la imagen Docker ──
+      - name: Build imagen Docker
+        run: |
+          docker build -t ${{ steps.vars.outputs.image_name }} .
+          docker save ${{ steps.vars.outputs.image_name }} | gzip > image.tar.gz
+
+      # ── Copiar imagen y script al servidor ──
+      - name: Copiar archivos al servidor
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "image.tar.gz,deploy.sh"
+          target: "/tmp/deploy"
+
+      # ── Ejecutar despliegue en el servidor ──
+      - name: Ejecutar despliegue en servidor
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /tmp/deploy
+            gunzip -c image.tar.gz | docker load
+            chmod +x deploy.sh
+            sudo bash deploy.sh \
+              "${{ steps.vars.outputs.container_name }}" \
+              "${{ steps.vars.outputs.image_name }}" \
+              "80" \
+              "${{ steps.vars.outputs.subdomain }}"
+            rm -rf /tmp/deploy
+
+      # ── Verificación final ──
+      - name: Verificar despliegue
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "📦 Contenedores activos:"
+            docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+            echo ""
+            echo "🌐 Verificando respuesta del servicio..."
+            curl -sf --max-time 10 http://localhost:$(docker port ${{ steps.vars.outputs.container_name }} | grep -oP '0\.0\.0\.0:\K[0-9]+' | head -1) > /dev/null && echo "✅ Servicio respondiendo correctamente" || echo "⚠️ El servicio no responde aún"

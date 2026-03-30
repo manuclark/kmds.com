@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Localhost :8000 — km-data-solutions",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:8000/km-data-solutions.html",
+      "webRoot": "${workspaceFolder}",
+      "preLaunchTask": "Servidor HTTP :8000"
+    },
+    {
+      "name": "Localhost :8000 — archivo actual",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:8000/${relativeFile}",
+      "webRoot": "${workspaceFolder}",
+      "preLaunchTask": "Servidor HTTP :8000"
+    }
+  ]
+}

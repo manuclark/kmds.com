@@ -1,0 +1,12 @@
+# Credenciales y llaves
+/credentials/
+*.pem
+*.key
+
+# Docker
+image.tar.gz
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
